@@ -2,74 +2,92 @@
 
 import { useState } from "react";
 import BackButton from "@/components/BackButton";
+import { LOCATION_IDS, SORT_OPTIONS } from "@/lib/constants";
 
 interface ScrapedProperty {
   id: string;
   title: string;
   price: string;
   location: string;
+  areaLocation: string;
   bedrooms: string;
   bathrooms: string;
   size: string;
   propertyType: string;
   url: string;
   agent: string;
+  verified: boolean;
+  permitNumber?: string;
+  referenceNumber?: string;
+  completionDate?: string;
+  furnishing?: string;
+  imageUrl?: string;
+  pageNumber: number;
+  positionOnPage: number;
 }
 
-const dubaiLocations = [
-  { id: "1", name: "All Dubai" },
-  { id: "51", name: "Dubai Marina" },
-  { id: "52", name: "Downtown Dubai" },
-  { id: "53", name: "Palm Jumeirah" },
-  { id: "50", name: "Business Bay" },
-  { id: "54", name: "JBR" },
-  { id: "55", name: "Dubai Hills Estate" },
-  { id: "56", name: "Arabian Ranches" },
-  { id: "57", name: "Jumeirah Village Circle" },
-  { id: "49", name: "Dubai Land" },
-  { id: "58", name: "Al Barsha" },
-  { id: "59", name: "DIFC" },
-  { id: "60", name: "City Walk" },
-  { id: "61", name: "Jumeirah" },
-  { id: "62", name: "Al Quoz" },
-  { id: "63", name: "Dubai Silicon Oasis" },
-  { id: "64", name: "Motor City" },
-  { id: "65", name: "Sports City" },
-  { id: "66", name: "International City" },
-  { id: "67", name: "Discovery Gardens" },
-];
-
-const propertyTypes = [
+const PROPERTY_TYPES_SCRAPER = [
   { value: "", label: "All Types" },
-  { value: "apartment", label: "Apartment" },
-  { value: "villa", label: "Villa" },
-  { value: "townhouse", label: "Townhouse" },
-  { value: "penthouse", label: "Penthouse" },
-  { value: "duplex", label: "Duplex" },
-  { value: "land", label: "Land" },
+  { value: "1", label: "Apartment" },
+  { value: "35", label: "Villa" },
+  { value: "22", label: "Townhouse" },
+  { value: "20", label: "Penthouse" },
+  { value: "24", label: "Duplex" },
+  { value: "42", label: "Compound" },
+  { value: "14", label: "Land/Plot" },
 ];
 
-const purposes = [
-  { value: "for-sale", label: "For Sale" },
-  { value: "for-rent", label: "For Rent" },
+const PURPOSES = [
+  { value: "for-sale", label: "For Sale", pfValue: "1" },
+  { value: "for-rent", label: "For Rent", pfValue: "2" },
+];
+
+const CONSTRUCTION_STATUS_SCRAPER = [
+  { value: "", label: "Any Status" },
+  { value: "completed", label: "Ready" },
+  { value: "off_plan", label: "Off-Plan" },
 ];
 
 export default function PFScraperPage() {
   const [location, setLocation] = useState("51");
   const [purpose, setPurpose] = useState("for-sale");
   const [propertyType, setPropertyType] = useState("");
+  const [constructionStatus, setConstructionStatus] = useState("");
+  const [bedrooms, setBedrooms] = useState("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
-  const [bedrooms, setBedrooms] = useState("");
+  const [sortBy, setSortBy] = useState("mr");
   const [pages, setPages] = useState("5");
   const [scraping, setScraping] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState({ current: 0, total: 0, status: "" });
   const [results, setResults] = useState<ScrapedProperty[]>([]);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [mode, setMode] = useState<"manual" | "url">("manual");
+  const [directUrl, setDirectUrl] = useState("");
+
+  // Build search URL
+  const buildSearchUrl = () => {
+    const locationName = LOCATION_IDS[location]?.toLowerCase().replace(/\s+/g, "-") || "dubai";
+    let url = `https://www.propertyfinder.ae/en/${purpose}/properties-${locationName}.html`;
+
+    const params: string[] = [];
+    if (propertyType) params.push(`pt=${propertyType}`);
+    if (bedrooms) params.push(`br=${bedrooms}`);
+    if (minPrice) params.push(`pf=${minPrice}`);
+    if (maxPrice) params.push(`pt=${maxPrice}`);
+    if (constructionStatus) params.push(`cs=${constructionStatus}`);
+    if (sortBy) params.push(`so=${sortBy}`);
+
+    if (params.length > 0) {
+      url += `?${params.join("&")}`;
+    }
+
+    return url;
+  };
 
   const startScraping = async () => {
     setScraping(true);
-    setProgress(0);
+    setProgress({ current: 0, total: parseInt(pages), status: "Starting..." });
     setResults([]);
     setResult(null);
 
@@ -79,67 +97,140 @@ export default function PFScraperPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           location,
+          locationName: LOCATION_IDS[location],
           purpose,
           propertyType,
+          constructionStatus,
+          bedrooms,
           minPrice,
           maxPrice,
-          bedrooms,
+          sortBy,
           pages: parseInt(pages),
+          directUrl: mode === "url" ? directUrl : undefined,
         }),
       });
 
-      const data = await response.json();
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader available");
 
-      if (data.success) {
-        setResults(data.properties);
-        setProgress(100);
-        setResult({
-          success: true,
-          message: `Successfully scraped ${data.properties.length} properties from ${pages} pages`,
-        });
-      } else {
-        setResult({ success: false, message: data.message || "Scraping failed" });
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.type === "progress") {
+                setProgress({
+                  current: data.current,
+                  total: data.total,
+                  status: data.status,
+                });
+              } else if (data.type === "properties") {
+                setResults((prev) => [...prev, ...data.properties]);
+              } else if (data.type === "complete") {
+                setResult({
+                  success: true,
+                  message: `Scraped ${data.total} properties from ${data.pages} pages`,
+                });
+              } else if (data.type === "error") {
+                setResult({ success: false, message: data.message });
+              }
+            } catch (e) {
+              // Ignore parse errors
+            }
+          }
+        }
       }
     } catch (error) {
       setResult({ success: false, message: "Failed to start scraping" });
     } finally {
       setScraping(false);
+      setProgress({ current: 0, total: 0, status: "" });
     }
   };
 
   const exportToCsv = () => {
     if (results.length === 0) return;
 
-    const headers = ["Title", "Price", "Location", "Bedrooms", "Bathrooms", "Size", "Property Type", "Agent", "URL"];
+    const headers = [
+      "Scrape Date",
+      "Location ID",
+      "Area Location",
+      "Property Type",
+      "Bedrooms",
+      "Bathrooms",
+      "Size (sq.ft)",
+      "Title",
+      "Price",
+      "Location",
+      "Verified",
+      "Completion Date",
+      "Furnishing",
+      "Permit Number",
+      "Reference Number",
+      "Agent",
+      "URL",
+      "Page Number",
+      "Position",
+    ];
+
     const csvContent = [
       headers.join(","),
       ...results.map((p) =>
         [
-          `"${p.title}"`,
-          p.price,
-          `"${p.location}"`,
+          new Date().toISOString().split("T")[0],
+          location,
+          `"${p.areaLocation || ""}"`,
+          p.propertyType,
           p.bedrooms,
           p.bathrooms,
           p.size,
-          p.propertyType,
+          `"${p.title.replace(/"/g, '""')}"`,
+          `"${p.price}"`,
+          `"${p.location}"`,
+          p.verified ? "Yes" : "No",
+          p.completionDate || "",
+          p.furnishing || "",
+          p.permitNumber || "",
+          p.referenceNumber || "",
           `"${p.agent}"`,
           p.url,
+          p.pageNumber,
+          p.positionOnPage,
         ].join(",")
       ),
     ].join("\n");
 
-    const blob = new Blob([csvContent], { type: "text/csv" });
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `property_finder_${location}_${new Date().toISOString().split("T")[0]}.csv`;
+    a.download = `property_finder_${LOCATION_IDS[location]?.replace(/\s+/g, "_")}_${new Date().toISOString().split("T")[0]}.csv`;
     a.click();
     window.URL.revokeObjectURL(url);
   };
 
+  const appendToMaster = () => {
+    // In browser, we store in localStorage
+    const existingData = localStorage.getItem("pf_master_csv");
+    const existing = existingData ? JSON.parse(existingData) : [];
+    const combined = [...existing, ...results];
+    localStorage.setItem("pf_master_csv", JSON.stringify(combined));
+    setResult({ success: true, message: `Appended ${results.length} properties to master list (total: ${combined.length})` });
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-8">
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-7xl mx-auto">
         <BackButton />
 
         {/* Header */}
@@ -158,11 +249,11 @@ export default function PFScraperPage() {
         {/* Proxy Info */}
         <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700 mb-6 flex flex-wrap gap-6">
           <div>
-            <span className="text-gray-500 text-xs uppercase tracking-wider">Proxy Provider</span>
+            <span className="text-gray-500 text-xs uppercase tracking-wider">Proxy</span>
             <p className="text-white font-mono text-sm">Oxylabs Residential</p>
           </div>
           <div>
-            <span className="text-gray-500 text-xs uppercase tracking-wider">Proxy Region</span>
+            <span className="text-gray-500 text-xs uppercase tracking-wider">Region</span>
             <p className="text-white font-mono text-sm">UAE (ae)</p>
           </div>
           <div>
@@ -184,125 +275,206 @@ export default function PFScraperPage() {
           </div>
         )}
 
+        {/* Mode Toggle */}
+        <div className="flex gap-2 mb-6">
+          <button
+            onClick={() => setMode("manual")}
+            className={`px-4 py-2 rounded-lg font-medium transition-all ${
+              mode === "manual" ? "bg-purple-600 text-white" : "bg-gray-800 text-gray-400"
+            }`}
+          >
+            Manual Search
+          </button>
+          <button
+            onClick={() => setMode("url")}
+            className={`px-4 py-2 rounded-lg font-medium transition-all ${
+              mode === "url" ? "bg-purple-600 text-white" : "bg-gray-800 text-gray-400"
+            }`}
+          >
+            Direct URL
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Search Parameters */}
           <div className="bg-gray-800 rounded-xl p-6 border border-gray-700">
             <h2 className="text-xl font-bold text-white mb-6">Search Parameters</h2>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Location</label>
-                <select
-                  value={location}
-                  onChange={(e) => setLocation(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                >
-                  {dubaiLocations.map((loc) => (
-                    <option key={loc.id} value={loc.id}>{loc.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Purpose</label>
-                <select
-                  value={purpose}
-                  onChange={(e) => setPurpose(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                >
-                  {purposes.map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Property Type</label>
-                <select
-                  value={propertyType}
-                  onChange={(e) => setPropertyType(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                >
-                  {propertyTypes.map((type) => (
-                    <option key={type.value} value={type.value}>{type.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+            {mode === "url" ? (
+              <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Min Price</label>
-                  <input
-                    type="number"
-                    value={minPrice}
-                    onChange={(e) => setMinPrice(e.target.value)}
-                    placeholder="0"
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Property Finder URL</label>
+                  <textarea
+                    value={directUrl}
+                    onChange={(e) => setDirectUrl(e.target.value)}
+                    rows={3}
+                    placeholder="Paste a Property Finder search URL..."
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Max Price</label>
-                  <input
-                    type="number"
-                    value={maxPrice}
-                    onChange={(e) => setMaxPrice(e.target.value)}
-                    placeholder="Any"
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                  />
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Pages to Scrape</label>
+                  <select
+                    value={pages}
+                    onChange={(e) => setPages(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {[1, 2, 3, 5, 10, 15, 20, 25, 50].map((num) => (
+                      <option key={num} value={num}>{num} pages (~{num * 25} listings)</option>
+                    ))}
+                  </select>
                 </div>
               </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Location</label>
+                  <select
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {Object.entries(LOCATION_IDS).map(([id, name]) => (
+                      <option key={id} value={id}>{name}</option>
+                    ))}
+                  </select>
+                </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Bedrooms</label>
-                <select
-                  value={bedrooms}
-                  onChange={(e) => setBedrooms(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                >
-                  <option value="">Any</option>
-                  <option value="0">Studio</option>
-                  {[1, 2, 3, 4, 5, 6, 7].map((num) => (
-                    <option key={num} value={num}>{num} BR</option>
-                  ))}
-                </select>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Purpose</label>
+                  <select
+                    value={purpose}
+                    onChange={(e) => setPurpose(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {PURPOSES.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Property Type</label>
+                  <select
+                    value={propertyType}
+                    onChange={(e) => setPropertyType(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {PROPERTY_TYPES_SCRAPER.map((type) => (
+                      <option key={type.value} value={type.value}>{type.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Construction Status</label>
+                  <select
+                    value={constructionStatus}
+                    onChange={(e) => setConstructionStatus(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {CONSTRUCTION_STATUS_SCRAPER.map((status) => (
+                      <option key={status.value} value={status.value}>{status.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Bedrooms</label>
+                  <select
+                    value={bedrooms}
+                    onChange={(e) => setBedrooms(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    <option value="">Any</option>
+                    <option value="0">Studio</option>
+                    {[1, 2, 3, 4, 5, 6, 7].map((num) => (
+                      <option key={num} value={num}>{num} BR</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Min Price</label>
+                    <input
+                      type="number"
+                      value={minPrice}
+                      onChange={(e) => setMinPrice(e.target.value)}
+                      placeholder="0"
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Max Price</label>
+                    <input
+                      type="number"
+                      value={maxPrice}
+                      onChange={(e) => setMaxPrice(e.target.value)}
+                      placeholder="Any"
+                      className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Sort By</label>
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {SORT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Pages to Scrape</label>
+                  <select
+                    value={pages}
+                    onChange={(e) => setPages(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white"
+                  >
+                    {[1, 2, 3, 5, 10, 15, 20, 25, 50].map((num) => (
+                      <option key={num} value={num}>{num} pages (~{num * 25} listings)</option>
+                    ))}
+                  </select>
+                </div>
               </div>
+            )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Pages to Scrape</label>
-                <select
-                  value={pages}
-                  onChange={(e) => setPages(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                >
-                  {[1, 2, 3, 5, 10, 15, 20, 25, 50].map((num) => (
-                    <option key={num} value={num}>{num} pages (~{num * 25} listings)</option>
-                  ))}
-                </select>
+            {/* Generated URL Preview */}
+            {mode === "manual" && (
+              <div className="mt-4 p-3 bg-gray-900 rounded-lg">
+                <p className="text-xs text-gray-500 mb-1">Generated URL:</p>
+                <p className="text-xs text-purple-400 break-all">{buildSearchUrl()}</p>
               </div>
+            )}
 
-              <button
-                onClick={startScraping}
-                disabled={scraping}
-                className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
-              >
-                {scraping ? (
-                  <>
-                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Scraping...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                    </svg>
-                    Start Scraping
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              onClick={startScraping}
+              disabled={scraping}
+              className="w-full mt-6 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 text-white font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+            >
+              {scraping ? (
+                <>
+                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Scraping...
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  Start Scraping
+                </>
+              )}
+            </button>
           </div>
 
           {/* Results */}
@@ -314,36 +486,44 @@ export default function PFScraperPage() {
                   {results.length} properties
                 </span>
                 {results.length > 0 && (
-                  <button
-                    onClick={exportToCsv}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Export CSV
-                  </button>
+                  <>
+                    <button
+                      onClick={exportToCsv}
+                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Export CSV
+                    </button>
+                    <button
+                      onClick={appendToMaster}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Add to Master
+                    </button>
+                  </>
                 )}
               </div>
             </div>
 
             {/* Progress Bar */}
-            {scraping && (
+            {scraping && progress.total > 0 && (
               <div className="mb-6">
                 <div className="flex justify-between text-sm text-gray-400 mb-2">
-                  <span>Scraping in progress...</span>
-                  <span>{progress}%</span>
+                  <span>{progress.status}</span>
+                  <span>Page {progress.current} of {progress.total}</span>
                 </div>
                 <div className="w-full bg-gray-700 rounded-full h-2">
                   <div
                     className="bg-purple-600 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  ></div>
+                    style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                  />
                 </div>
               </div>
             )}
 
-            {results.length === 0 ? (
+            {results.length === 0 && !scraping ? (
               <div className="text-center py-12 text-gray-500">
                 <svg className="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -360,7 +540,12 @@ export default function PFScraperPage() {
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex-grow">
-                        <h3 className="text-white font-medium line-clamp-1">{property.title}</h3>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-white font-medium line-clamp-1">{property.title}</h3>
+                          {property.verified && (
+                            <span className="px-1.5 py-0.5 bg-blue-900/50 text-blue-400 text-xs rounded">Verified</span>
+                          )}
+                        </div>
                         <p className="text-gray-400 text-sm mt-1">{property.location}</p>
                         <div className="flex flex-wrap gap-3 mt-2 text-sm">
                           <span className="text-purple-400 font-medium">{property.price}</span>
@@ -371,7 +556,15 @@ export default function PFScraperPage() {
                           <span className="text-gray-500">|</span>
                           <span className="text-gray-400">{property.size} sq.ft</span>
                         </div>
-                        <p className="text-gray-500 text-xs mt-2">Agent: {property.agent}</p>
+                        {(property.permitNumber || property.completionDate) && (
+                          <div className="flex gap-4 mt-2 text-xs text-gray-500">
+                            {property.permitNumber && <span>Permit: {property.permitNumber}</span>}
+                            {property.completionDate && <span>Completion: {property.completionDate}</span>}
+                          </div>
+                        )}
+                        <p className="text-gray-500 text-xs mt-2">
+                          Agent: {property.agent} | Page {property.pageNumber}, #{property.positionOnPage}
+                        </p>
                       </div>
                       <a
                         href={property.url}
